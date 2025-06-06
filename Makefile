@@ -1,4 +1,4 @@
-.PHONY: build run test clean fmt vet lint deps dev docker-build docker-run docker-stop docker-logs docker-clean backup-test db-migrate db-check db-backup db-restore
+.PHONY: build run test clean fmt vet lint deps dev docker-build docker-run docker-stop docker-logs docker-clean backup-test db-migrate db-check db-backup db-restore docker-export docker-export-help
 
 build:
 	@echo "Building..."
@@ -92,6 +92,34 @@ db-restore:
 	fi
 	docker exec -i goblog-postgres psql -U goblog goblog < $(BACKUP_FILE)
 
+# Docker镜像导出相关
+docker-export-help:
+	@echo "Docker镜像导出和上传工具"
+	@echo ""
+	@./scripts/export_and_upload_images.sh --help
+
+docker-export:
+	@echo "Docker镜像导出和上传..."
+	@echo "用法: make docker-export HOST=<server> USER=<user> PATH=<path> [OPTIONS]"
+	@echo ""
+	@echo "示例:"
+	@echo "  make docker-export HOST=192.168.1.100 USER=root PATH=/opt/docker-images/"
+	@echo "  make docker-export HOST=192.168.1.100 USER=deploy PATH=/home/deploy/images/ PORT=2222"
+	@echo "  make docker-export HOST=192.168.1.100 USER=root PATH=/opt/docker-images/ DRY_RUN=true"
+	@echo ""
+	@if [ -z "$(HOST)" ] || [ -z "$(USER)" ] || [ -z "$(PATH)" ]; then \
+		echo "错误: 缺少必需参数 HOST, USER, PATH"; \
+		echo "使用 'make docker-export-help' 查看详细帮助"; \
+		exit 1; \
+	fi
+	@# 构建参数
+	@ARGS=""; \
+	if [ -n "$(PORT)" ]; then ARGS="$$ARGS -p $(PORT)"; fi; \
+	if [ -n "$(KEY)" ]; then ARGS="$$ARGS -i $(KEY)"; fi; \
+	if [ "$(KEEP)" = "true" ]; then ARGS="$$ARGS -k"; fi; \
+	if [ "$(DRY_RUN)" = "true" ]; then ARGS="$$ARGS --dry-run"; fi; \
+	./scripts/export_and_upload_images.sh $$ARGS $(HOST) $(USER) $(PATH)
+
 # 备份相关
 backup-test:
 	@echo "Testing backup endpoint..."
@@ -122,5 +150,7 @@ help:
 	@echo "  db-check       - Check PostgreSQL connection"
 	@echo "  db-backup      - Create database backup"
 	@echo "  db-restore     - Restore database from backup"
+	@echo "  docker-export  - Export and upload Docker images to remote server"
+	@echo "  docker-export-help - Show Docker export tool help"
 	@echo "  backup-test    - Test backup endpoint"
 	@echo "  help           - Show this help" 
