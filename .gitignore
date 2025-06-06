@@ -1,0 +1,52 @@
+# 二进制文件
+/bin/
+*.exe
+*.exe~
+*.dll
+*.so
+*.dylib
+goblog
+
+# 测试覆盖率文件
+*.out
+coverage.html
+coverage.out
+
+# 数据库文件
+*.db
+*.sqlite
+*.sqlite3
+
+# 日志文件
+*.log
+
+# 临时文件
+*.tmp
+*.temp
+
+# IDE和编辑器文件
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# 系统文件
+.DS_Store
+Thumbs.db
+
+# 环境变量文件
+.env
+.env.local
+.env.production
+
+# 依赖文件
+vendor/
+
+# 构建产物
+dist/
+build/
+
+# 调试文件
+debug
+debug.test 

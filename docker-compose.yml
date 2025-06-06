@@ -1,0 +1,114 @@
+version: "3.8"
+
+services:
+  # PostgreSQL 数据库服务
+  postgres:
+    image: postgres:15-alpine
+    container_name: goblog-postgres
+    environment:
+      POSTGRES_DB: goblog
+      POSTGRES_USER: goblog
+      POSTGRES_PASSWORD: goblog123
+      POSTGRES_INITDB_ARGS: "--encoding=UTF8 --locale=C"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      - ./scripts/init.sql:/docker-entrypoint-initdb.d/init.sql:ro
+    ports:
+      - "5432:5432"
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U goblog -d goblog"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 30s
+    networks:
+      - goblog-network
+
+  # 博客后端服务
+  goblog:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: goblog-backend
+    ports:
+      - "8080:8080"
+    environment:
+      - PORT=8080
+      - JWT_SECRET=secret
+      - DB_DRIVER=postgres
+      - DB_DSN=host=postgres port=5432 user=goblog password=goblog123 dbname=goblog sslmode=disable
+      - LOG_LEVEL=info
+      - ADMIN_USERNAME=admin
+      - ADMIN_PASSWORD=admin123
+    depends_on:
+      postgres:
+        condition: service_healthy
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "/app/goblog", "--health-check"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 40s
+    networks:
+      - goblog-network
+
+  # PostgreSQL 数据库备份服务
+  postgres-backup:
+    image: postgres:15-alpine
+    container_name: goblog-postgres-backup
+    depends_on:
+      postgres:
+        condition: service_healthy
+    volumes:
+      - postgres_backups:/backups
+    environment:
+      - PGPASSWORD=goblog123
+      - BACKUP_SCHEDULE=0 2 * * *  # 每天凌晨2点备份
+    command: |
+      sh -c "
+        echo '设置PostgreSQL定时备份任务...'
+        echo '#!/bin/sh' > /backup.sh
+        echo 'pg_dump -h postgres -U goblog -d goblog > /backups/goblog_backup_$$(date +%Y%m%d_%H%M%S).sql' >> /backup.sh
+        echo 'find /backups -name \"*.sql\" -mtime +7 -delete' >> /backup.sh
+        chmod +x /backup.sh
+        echo '$${BACKUP_SCHEDULE} /backup.sh' > /var/spool/cron/crontabs/root
+        crond -f
+      "
+    restart: unless-stopped
+    networks:
+      - goblog-network
+
+  # pgAdmin Web管理界面 (可选)
+  pgadmin:
+    image: dpage/pgadmin4:latest
+    container_name: goblog-pgadmin
+    environment:
+      PGADMIN_DEFAULT_EMAIL: admin@goblog.com
+      PGADMIN_DEFAULT_PASSWORD: admin123
+      PGADMIN_CONFIG_SERVER_MODE: 'False'
+    volumes:
+      - pgadmin_data:/var/lib/pgadmin
+    ports:
+      - "8081:80"
+    depends_on:
+      - postgres
+    restart: unless-stopped
+    networks:
+      - goblog-network
+
+# 网络定义
+networks:
+  goblog-network:
+    driver: bridge
+
+# 数据卷定义
+volumes:
+  postgres_data:
+    driver: local
+  postgres_backups:
+    driver: local
+  pgadmin_data:
+    driver: local
+
