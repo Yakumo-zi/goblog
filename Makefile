@@ -105,6 +105,8 @@ docker-export:
 	@echo "示例:"
 	@echo "  make docker-export HOST=192.168.1.100 USER=root PATH=/opt/docker-images/"
 	@echo "  make docker-export HOST=192.168.1.100 USER=deploy PATH=/home/deploy/images/ PORT=2222"
+	@echo "  make docker-export HOST=192.168.1.100 USER=root PATH=/opt/docker-images/ PASSWORD=true"
+	@echo "  make docker-export HOST=192.168.1.100 USER=root PATH=/opt/docker-images/ PASSWORD='your_password'"
 	@echo "  make docker-export HOST=192.168.1.100 USER=root PATH=/opt/docker-images/ DRY_RUN=true"
 	@echo ""
 	@if [ -z "$(HOST)" ] || [ -z "$(USER)" ] || [ -z "$(PATH)" ]; then \
@@ -116,6 +118,10 @@ docker-export:
 	@ARGS=""; \
 	if [ -n "$(PORT)" ]; then ARGS="$$ARGS -p $(PORT)"; fi; \
 	if [ -n "$(KEY)" ]; then ARGS="$$ARGS -i $(KEY)"; fi; \
+	if [ "$(PASSWORD)" = "true" ]; then ARGS="$$ARGS -P"; \
+	elif [ -n "$(PASSWORD)" ] && [ "$(PASSWORD)" != "true" ]; then \
+		export SSH_PASS='$(PASSWORD)'; ARGS="$$ARGS -P"; fi; \
+	if [ -n "$(PASSWORD_FILE)" ]; then ARGS="$$ARGS --password-file $(PASSWORD_FILE)"; fi; \
 	if [ "$(KEEP)" = "true" ]; then ARGS="$$ARGS -k"; fi; \
 	if [ "$(DRY_RUN)" = "true" ]; then ARGS="$$ARGS --dry-run"; fi; \
 	./scripts/export_and_upload_images.sh $$ARGS $(HOST) $(USER) $(PATH)

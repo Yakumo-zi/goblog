@@ -5,6 +5,9 @@
 
 set -e
 
+# 设置环境变量，确保能找到常用命令
+export PATH="/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:$PATH"
+
 # 颜色输出
 RED='\033[0;31m'
 GREEN='\033[0;32m'
@@ -14,7 +17,27 @@ NC='\033[0m' # No Color
 
 # 配置变量
 EXPORT_DIR="./docker-images"
-DATE_SUFFIX=$(date +%Y%m%d_%H%M%S)
+
+# 获取日期后缀，使用多种方式尝试
+get_date_suffix() {
+    local date_cmd=""
+    
+    # 尝试不同的date命令路径
+    for cmd in "date" "/bin/date" "/usr/bin/date" "/usr/sbin/date"; do
+        if command -v "$cmd" &> /dev/null; then
+            date_cmd="$cmd"
+            break
+        fi
+    done
+    
+    if [ -z "$date_cmd" ]; then
+        echo "$(date +%s)" # 使用时间戳作为后备
+    else
+        "$date_cmd" +%Y%m%d_%H%M%S
+    fi
+}
+
+DATE_SUFFIX=$(get_date_suffix)
 ARCHIVE_NAME="goblog-docker-images-${DATE_SUFFIX}.tar.gz"
 
 # 项目使用的Docker镜像列表
@@ -57,11 +80,15 @@ show_usage() {
     echo "  -c, --compress 压缩镜像包 (默认开启)"
     echo "  -p, --port     SSH端口 (默认: 22)"
     echo "  -i, --identity SSH私钥文件路径"
+    echo "  -P, --password 使用SSH密码认证 (交互式输入)"
+    echo "  --password-file 从文件读取SSH密码"
     echo "  --dry-run      只显示将要执行的操作，不实际执行"
     echo ""
     echo "示例:"
     echo "  $0 192.168.1.100 root /opt/docker-images/"
     echo "  $0 -p 2222 -i ~/.ssh/id_rsa 192.168.1.100 deploy /home/deploy/images/"
+    echo "  $0 -P 192.168.1.100 root /opt/docker-images/"
+    echo "  $0 --password-file ~/.ssh/password 192.168.1.100 root /opt/docker-images/"
     echo "  $0 --dry-run 192.168.1.100 root /opt/docker-images/"
 }
 
@@ -70,6 +97,9 @@ KEEP_LOCAL=false
 COMPRESS=true
 SSH_PORT=22
 SSH_KEY=""
+USE_PASSWORD=false
+PASSWORD_FILE=""
+SSH_PASSWORD=""
 DRY_RUN=false
 
 while [[ $# -gt 0 ]]; do
@@ -92,6 +122,14 @@ while [[ $# -gt 0 ]]; do
             ;;
         -i|--identity)
             SSH_KEY="$2"
+            shift 2
+            ;;
+        -P|--password)
+            USE_PASSWORD=true
+            shift
+            ;;
+        --password-file)
+            PASSWORD_FILE="$2"
             shift 2
             ;;
         --dry-run)
@@ -120,6 +158,44 @@ REMOTE_HOST="$1"
 REMOTE_USER="$2"
 REMOTE_PATH="$3"
 
+# 处理密码认证
+if [ "$USE_PASSWORD" = true ] && [ -n "$PASSWORD_FILE" ]; then
+    log_error "不能同时使用 -P 和 --password-file 选项"
+    exit 1
+fi
+
+if [ "$USE_PASSWORD" = true ] && [ -n "$SSH_KEY" ]; then
+    log_error "不能同时使用密码认证和密钥认证"
+    exit 1
+fi
+
+# 获取SSH密码
+if [ "$USE_PASSWORD" = true ]; then
+    # 首先检查是否通过环境变量传递了密码
+    if [ -n "$SSH_PASS" ]; then
+        SSH_PASSWORD="$SSH_PASS"
+        log_info "使用环境变量中的SSH密码"
+    else
+        echo -n "请输入SSH密码: "
+        read -s SSH_PASSWORD
+        echo
+        if [ -z "$SSH_PASSWORD" ]; then
+            log_error "密码不能为空"
+            exit 1
+        fi
+    fi
+elif [ -n "$PASSWORD_FILE" ]; then
+    if [ ! -f "$PASSWORD_FILE" ]; then
+        log_error "密码文件不存在: $PASSWORD_FILE"
+        exit 1
+    fi
+    SSH_PASSWORD=$(cat "$PASSWORD_FILE")
+    if [ -z "$SSH_PASSWORD" ]; then
+        log_error "密码文件为空: $PASSWORD_FILE"
+        exit 1
+    fi
+fi
+
 # 构建SSH选项
 SSH_OPTS="-p ${SSH_PORT}"
 SCP_OPTS="-P ${SSH_PORT}"
@@ -127,25 +203,67 @@ SCP_OPTS="-P ${SSH_PORT}"
 if [ -n "$SSH_KEY" ]; then
     SSH_OPTS="$SSH_OPTS -i $SSH_KEY"
     SCP_OPTS="$SCP_OPTS -i $SSH_KEY"
+elif [ -n "$SSH_PASSWORD" ]; then
+    # 使用sshpass进行密码认证
+    SSH_CMD="sshpass -p '$SSH_PASSWORD' ssh"
+    SCP_CMD="sshpass -p '$SSH_PASSWORD' scp"
+else
+    SSH_CMD="ssh"
+    SCP_CMD="scp"
 fi
 
 # 检查依赖
 check_dependencies() {
     log_step "检查系统依赖..."
     
+    # 检查基本命令
+    local missing_commands=()
+    
     if ! command -v docker &> /dev/null; then
-        log_error "Docker未安装，请先安装Docker"
-        exit 1
+        missing_commands+=("docker")
     fi
     
     if ! command -v scp &> /dev/null; then
-        log_error "SCP未安装，请先安装OpenSSH客户端"
-        exit 1
+        missing_commands+=("scp")
     fi
     
     if ! command -v ssh &> /dev/null; then
-        log_error "SSH未安装，请先安装OpenSSH客户端"
+        missing_commands+=("ssh")
+    fi
+    
+    # 检查date命令（使用更灵活的方式）
+    local date_found=false
+    for cmd in "date" "/bin/date" "/usr/bin/date" "/usr/sbin/date"; do
+        if command -v "$cmd" &> /dev/null; then
+            date_found=true
+            break
+        fi
+    done
+    
+    if [ "$date_found" = false ]; then
+        missing_commands+=("date")
+    fi
+    
+    # 报告缺失的命令
+    if [ ${#missing_commands[@]} -gt 0 ]; then
+        log_error "缺少以下必需的命令:"
+        for cmd in "${missing_commands[@]}"; do
+            echo "  - $cmd"
+        done
+        log_error "请安装缺少的软件包"
         exit 1
+    fi
+    
+    # 检查是否需要sshpass
+    if [ -n "$SSH_PASSWORD" ]; then
+        if ! command -v sshpass &> /dev/null; then
+            log_error "使用密码认证需要安装sshpass"
+            log_error "请安装sshpass:"
+            log_error "  Ubuntu/Debian: sudo apt install sshpass"
+            log_error "  CentOS/RHEL:   sudo dnf install sshpass"
+            log_error "  macOS:         brew install sshpass"
+            exit 1
+        fi
     fi
     
     log_info "所有依赖检查完成"
@@ -160,7 +278,13 @@ check_remote_connection() {
         return 0
     fi
     
-    if ssh $SSH_OPTS -o ConnectTimeout=10 -o BatchMode=yes "$REMOTE_USER@$REMOTE_HOST" "echo 'Connection test successful'" &>/dev/null; then
+    # 对于密码认证，不能使用BatchMode
+    local connect_opts="$SSH_OPTS -o ConnectTimeout=10"
+    if [ -z "$SSH_PASSWORD" ]; then
+        connect_opts="$connect_opts -o BatchMode=yes"
+    fi
+    
+    if eval "$SSH_CMD $connect_opts \"$REMOTE_USER@$REMOTE_HOST\" \"echo 'Connection test successful'\"" &>/dev/null; then
         log_info "远程服务器连接成功"
     else
         log_error "无法连接到远程服务器 $REMOTE_USER@$REMOTE_HOST"
@@ -286,9 +410,9 @@ upload_to_remote() {
     # 确保远程目录存在
     log_info "创建远程目录..."
     if [ "$DRY_RUN" = false ]; then
-        ssh $SSH_OPTS "$REMOTE_USER@$REMOTE_HOST" "mkdir -p $REMOTE_PATH"
+        eval "$SSH_CMD $SSH_OPTS \"$REMOTE_USER@$REMOTE_HOST\" \"mkdir -p $REMOTE_PATH\""
     else
-        log_info "[DRY-RUN] ssh $SSH_OPTS $REMOTE_USER@$REMOTE_HOST \"mkdir -p $REMOTE_PATH\""
+        log_info "[DRY-RUN] $SSH_CMD $SSH_OPTS $REMOTE_USER@$REMOTE_HOST \"mkdir -p $REMOTE_PATH\""
     fi
     
     if [ "$COMPRESS" = true ]; then
@@ -297,22 +421,22 @@ upload_to_remote() {
         log_info "上传压缩包: $file_to_upload"
         
         if [ "$DRY_RUN" = false ]; then
-            scp $SCP_OPTS "$file_to_upload" "$REMOTE_USER@$REMOTE_HOST:$REMOTE_PATH"
+            eval "$SCP_CMD $SCP_OPTS \"$file_to_upload\" \"$REMOTE_USER@$REMOTE_HOST:$REMOTE_PATH\""
             
             # 在远程服务器上解压
             log_info "在远程服务器上解压..."
-            ssh $SSH_OPTS "$REMOTE_USER@$REMOTE_HOST" "cd $REMOTE_PATH && tar -xzf $ARCHIVE_NAME"
+            eval "$SSH_CMD $SSH_OPTS \"$REMOTE_USER@$REMOTE_HOST\" \"cd $REMOTE_PATH && tar -xzf $ARCHIVE_NAME\""
         else
-            log_info "[DRY-RUN] scp $SCP_OPTS $file_to_upload $REMOTE_USER@$REMOTE_HOST:$REMOTE_PATH"
-            log_info "[DRY-RUN] ssh $SSH_OPTS $REMOTE_USER@$REMOTE_HOST \"cd $REMOTE_PATH && tar -xzf $ARCHIVE_NAME\""
+            log_info "[DRY-RUN] $SCP_CMD $SCP_OPTS $file_to_upload $REMOTE_USER@$REMOTE_HOST:$REMOTE_PATH"
+            log_info "[DRY-RUN] $SSH_CMD $SSH_OPTS $REMOTE_USER@$REMOTE_HOST \"cd $REMOTE_PATH && tar -xzf $ARCHIVE_NAME\""
         fi
     else
         # 上传单个文件
         log_info "上传镜像文件..."
         if [ "$DRY_RUN" = false ]; then
-            scp $SCP_OPTS "$EXPORT_DIR"/*.tar "$REMOTE_USER@$REMOTE_HOST:$REMOTE_PATH"
+            eval "$SCP_CMD $SCP_OPTS \"$EXPORT_DIR\"/*.tar \"$REMOTE_USER@$REMOTE_HOST:$REMOTE_PATH\""
         else
-            log_info "[DRY-RUN] scp $SCP_OPTS $EXPORT_DIR/*.tar $REMOTE_USER@$REMOTE_HOST:$REMOTE_PATH"
+            log_info "[DRY-RUN] $SCP_CMD $SCP_OPTS $EXPORT_DIR/*.tar $REMOTE_USER@$REMOTE_HOST:$REMOTE_PATH"
         fi
     fi
     
@@ -360,10 +484,10 @@ EOF
         
         # 上传导入脚本
         log_info "上传导入脚本..."
-        scp $SCP_OPTS "$import_script" "$REMOTE_USER@$REMOTE_HOST:$REMOTE_PATH"
+        eval "$SCP_CMD $SCP_OPTS \"$import_script\" \"$REMOTE_USER@$REMOTE_HOST:$REMOTE_PATH\""
         
         # 给脚本添加执行权限
-        ssh $SSH_OPTS "$REMOTE_USER@$REMOTE_HOST" "chmod +x $REMOTE_PATH/$import_script"
+        eval "$SSH_CMD $SSH_OPTS \"$REMOTE_USER@$REMOTE_HOST\" \"chmod +x $REMOTE_PATH/$import_script\""
         
         # 清理本地脚本
         rm -f "$import_script"
@@ -411,7 +535,11 @@ show_summary() {
     done
     echo ""
     echo "📋 在远程服务器上导入镜像:"
-    echo "  ssh $SSH_OPTS $REMOTE_USER@$REMOTE_HOST"
+    if [ -n "$SSH_PASSWORD" ]; then
+        echo "  $SSH_CMD $SSH_OPTS $REMOTE_USER@$REMOTE_HOST"
+    else
+        echo "  ssh $SSH_OPTS $REMOTE_USER@$REMOTE_HOST"
+    fi
     echo "  cd $REMOTE_PATH"
     echo "  ./import_images.sh"
     echo ""
